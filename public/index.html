@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drift — go with the flow</title>
+<meta name="description" content="Tens of thousands of particles riding a curl-noise flow field on your GPU, in the browser. Drag to stir vortices. WebGL2, no server, no dependencies.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root{
+    --bg:#050508; --panel:rgba(10,11,20,.55); --stroke:rgba(150,160,220,.14);
+    --text:#e9edf8; --muted:#7a869e; --acc:#22d3ee;
+    --sans:system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;font-family:var(--sans)}
+  #c{position:fixed;inset:0;width:100vw;height:100vh;display:block;touch-action:none;cursor:move}
+  .overlay{position:fixed;inset:0;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between;padding:clamp(16px,3.2vw,38px)}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:9px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 10px var(--acc);animation:p 2.6s ease-in-out infinite}
+  @keyframes p{0%,100%{opacity:.35}50%{opacity:1}}
+  h1{font-size:clamp(38px,8.5vw,120px);font-weight:200;letter-spacing:.13em;margin:10px 0 0;line-height:.98;text-wrap:balance;text-shadow:0 0 40px rgba(34,211,238,.12)}
+  .tag{margin:13px 0 0;color:var(--muted);font-size:clamp(13px,1.5vw,16px);max-width:38ch;line-height:1.5}
+  .bar{pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--stroke);border-radius:14px;padding:8px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);width:fit-content;max-width:100%}
+  button{font:500 13px var(--sans);color:var(--text);background:rgba(255,255,255,.04);border:1px solid var(--stroke);border-radius:9px;padding:9px 13px;cursor:pointer;transition:background .18s,border-color .18s,transform .05s}
+  button:hover{background:rgba(255,255,255,.09);border-color:rgba(150,160,220,.3)}
+  button:active{transform:translateY(1px)}
+  button[aria-pressed="true"]{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.55);color:#fff}
+  .meta{font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--muted);padding:0 6px;text-transform:uppercase;white-space:nowrap}
+  .fallback{position:fixed;inset:0;display:none;place-items:center;text-align:center;padding:24px}
+  .fallback.on{display:grid}
+  .fallback .card{max-width:44ch}
+  .fallback h2{font-weight:300;letter-spacing:.06em}
+  .fallback p{color:var(--muted);line-height:1.6}
+  .fallback code{font-family:var(--mono);font-size:13px}
+  @media (prefers-reduced-motion:reduce){.dot{animation:none}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="overlay">
+  <div>
+    <div class="eyebrow"><span class="dot"></span>Live flow field &middot; 65,536 particles &middot; WebGL2</div>
+    <h1>DRIFT</h1>
+    <p class="tag">A curl-noise current carrying sixty-five thousand particles on your GPU. Drag to spin up vortices.</p>
+  </div>
+  <div class="bar" role="toolbar" aria-label="Flow controls">
+    <span class="meta" id="fps">-- fps</span>
+    <button data-pal="0" aria-pressed="true">Monsoon</button>
+    <button data-pal="1" aria-pressed="false">Ember</button>
+    <button data-pal="2" aria-pressed="false">Ultraviolet</button>
+    <button id="pause">Pause</button>
+    <button id="reset">Reset</button>
+  </div>
+</div>
+<div class="fallback" id="fallback">
+  <div class="card">
+    <h2>No floating-point canvas</h2>
+    <p>This experiment needs WebGL2 with float render targets and float blending (<code>EXT_color_buffer_float</code>, <code>EXT_float_blend</code>). Open it in a recent Chrome, Edge, Safari, or Firefox and the current will appear.</p>
+  </div>
+</div>
+<script>
+'use strict';
+/* Drift: curl-noise flow-field particles on the visitor GPU.
+ * Particle state (pos, age, hue) lives in a float texture. Each frame:
+ * advect 65k particles through an analytic flow plus pointer vortices,
+ * stamp them additively into a fading trail map, display the trails.
+ * No CPU in the loop. */
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, depth: false, alpha: false });
+if (!gl || !gl.getExtension('EXT_color_buffer_float') || !gl.getExtension('EXT_float_blend')) {
+  document.getElementById('fallback').classList.add('on');
+} else {
+  main();
+}
+
+function main() {
+  const PW = 256, PH = 256, COUNT = PW * PH;
+  const PALS = [
+    { a: [0.45, 0.55, 0.60], b: [0.40, 0.40, 0.35], c: [1.00, 1.00, 1.00], d: [0.55, 0.75, 0.90], h: [0.42, 0.50] },
+    { a: [0.55, 0.30, 0.15], b: [0.45, 0.35, 0.30], c: [1.00, 1.00, 1.00], d: [0.00, 0.15, 0.25], h: [0.42, 0.02] },
+    { a: [0.40, 0.25, 0.55], b: [0.45, 0.40, 0.45], c: [1.00, 1.00, 1.00], d: [0.75, 0.35, 0.10], h: [0.42, 0.72] },
+  ];
+  let pal = 0, paused = false, simT = 0, frameNo = 0;
+  const vort = { x: 0.5, y: 0.5, vx: 0, vy: 0, life: 0 };
+
+  const VS_QUAD = `#version 300 es
+  layout(location=0) in vec2 aPos; out vec2 vUv;
+  void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+  const FS_UPD = `#version 300 es
+  precision highp float; in vec2 vUv; out vec4 o;
+  uniform sampler2D uP; uniform float uDt, uT, uFrame, uAsp, uLife;
+  uniform vec4 uVort;
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)))*43758.5453); }
+  vec2 flow(vec2 p, float t){
+    float s = p.x*5.0 + t*0.25 + sin(p.y*3.0 - t*0.18)*0.8;
+    float r = p.y*5.0 - t*0.21 + cos(p.x*3.0 + t*0.15)*0.8;
+    return vec2(sin(s+r) + 0.5*sin(2.0*s - r + t*0.10),
+                cos(s-r) + 0.5*cos(2.0*r + s - t*0.12));
+  }
+  void main(){
+    vec4 s = texture(uP, vUv);
+    vec2 p = s.rg;
+    float maxAge = 5.0 + 6.0*fract(s.a*7.31);
+    float age = s.b + uDt/maxAge;
+    float h1 = hash(vUv*913.7 + uFrame*0.618);
+    float h2 = hash(vUv*547.3 - uFrame*0.377);
+    if(age >= 1.0){ p = vec2(h1, h2); age = 0.0; }
+    vec2 pa = vec2(p.x*uAsp, p.y);
+    vec2 v = flow(pa, uT);
+    vec2 off = pa - vec2(uVort.x*uAsp, uVort.y);
+    float d2 = dot(off, off);
+    float sw = exp(-d2/0.015)*clamp(uLife, 0.0, 1.0);
+    vec2 vort = vec2(-off.y, off.x)/max(sqrt(d2), 1e-3)*sw*0.9
+              + uVort.zw*sw*0.35;
+    v += vort;
+    p += v*uDt*0.055;
+    p = fract(p);
+    o = vec4(p, fract(age), s.a);
+  }`;
+  const VS_DOT = `#version 300 es
+  layout(location=0) in float aId;
+  uniform sampler2D uP; uniform vec2 uDim; uniform float uPx;
+  uniform vec3 uPa, uPb, uPc, uPd; uniform vec2 uHue;
+  out vec3 vCol;
+  void main(){
+    float w = uDim.x;
+    vec2 uv = (vec2(mod(aId, w), floor(aId/w)) + 0.5)/uDim;
+    vec4 s = texture(uP, uv);
+    vec2 clip = s.rg*1.98 - 0.99;
+    gl_Position = vec4(clip, 0., 1.);
+    gl_PointSize = uPx;
+    float h = fract(s.a*uHue.x + uHue.y);
+    vec3 col = uPa + uPb*cos(6.2831853*(uPc*h + uPd));
+    vCol = col*0.7;
+  }`;
+  const FS_DOT = `#version 300 es
+  precision mediump float; in vec3 vCol; out vec4 o;
+  void main(){
+    float d = length(gl_PointCoord - 0.5);
+    float a = smoothstep(0.5, 0.08, d);
+    o = vec4(vCol*a, 1.0);
+  }`;
+  const FS_FADE = `#version 300 es
+  precision highp float; in vec2 vUv; out vec4 o;
+  uniform sampler2D uT; uniform float uK;
+  void main(){ o = vec4(texture(uT, vUv).rgb*uK, 1.); }`;
+  const FS_SHOW = `#version 300 es
+  precision highp float; in vec2 vUv; out vec4 o;
+  uniform sampler2D uT;
+  void main(){
+    vec3 c = texture(uT, vUv).rgb;
+    c = vec3(1.0) - exp(-c*1.5);
+    float vig = smoothstep(1.30, 0.30, length(vUv-0.5)*1.5);
+    o = vec4(c*(0.45 + 0.55*vig), 1.0);
+  }`;
+
+  function fprog(vs, fs) {
+    const v = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(v, vs); gl.compileShader(v);
+    if (!gl.getShaderParameter(v, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(v));
+    const f = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(f, fs); gl.compileShader(f);
+    if (!gl.getShaderParameter(f, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(f));
+    const p = gl.createProgram();
+    gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+    return p;
+  }
+  const P = {
+    upd: fprog(VS_QUAD, FS_UPD),
+    dot: fprog(VS_DOT, FS_DOT),
+    fade: fprog(VS_QUAD, FS_FADE),
+    show: fprog(VS_QUAD, FS_SHOW),
+  };
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const ids = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ids);
+  const idArr = new Float32Array(COUNT);
+  for (let i = 0; i < COUNT; i++) idArr[i] = i;
+  gl.bufferData(gl.ARRAY_BUFFER, idArr, gl.STATIC_DRAW);
+
+  function fboTex(w, h, data) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, data || null);
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    return { t, f, w, h };
+  }
+  function seedParticles() {
+    const data = new Float32Array(PW * PH * 4);
+    for (let i = 0; i < PW * PH; i++) {
+      data[i * 4] = Math.random();
+      data[i * 4 + 1] = Math.random();
+      data[i * 4 + 2] = Math.random();
+      data[i * 4 + 3] = Math.random();
+    }
+    return data;
+  }
+  let parts = null;
+  function makeParts() {
+    const a = fboTex(PW, PH, seedParticles()), b = fboTex(PW, PH, null);
+    parts = { read: a, write: b, swap() { const t = this.read; this.read = this.write; this.write = t; } };
+  }
+  makeParts();
+  let TW = 1024, TH = 640, trail = null;
+  function makeTrail() {
+    const a = fboTex(TW, TH, null), b = fboTex(TW, TH, null);
+    trail = { read: a, write: b, swap() { const t = this.read; this.read = this.write; this.write = t; } };
+  }
+  function sizeTrail() {
+    const a = canvas.width / Math.max(canvas.height, 1);
+    TH = 640; TW = Math.max(320, Math.min(1280, Math.round(TH * a)));
+    makeTrail();
+  }
+
+  function bindTex(p, name, unit, tex) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(p, name), unit);
+  }
+  function quadDraw() { gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  function useQuad(p) {
+    gl.useProgram(p);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.disableVertexAttribArray(1);
+  }
+
+  function step(dt) {
+    frameNo++;
+    const asp = TW / TH;
+    let p = P.upd;
+    gl.useProgram(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, parts.write.f);
+    gl.viewport(0, 0, PW, PH);
+    bindTex(p, 'uP', 0, parts.read.t);
+    gl.uniform1f(gl.getUniformLocation(p, 'uDt'), dt);
+    gl.uniform1f(gl.getUniformLocation(p, 'uT'), simT);
+    gl.uniform1f(gl.getUniformLocation(p, 'uFrame'), frameNo);
+    gl.uniform1f(gl.getUniformLocation(p, 'uAsp'), asp);
+    gl.uniform1f(gl.getUniformLocation(p, 'uLife'), vort.life);
+    gl.uniform4f(gl.getUniformLocation(p, 'uVort'), vort.x, vort.y, vort.vx, vort.vy);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    quadDraw();
+    parts.swap();
+
+    p = P.fade;
+    useQuad(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, trail.write.f);
+    gl.viewport(0, 0, TW, TH);
+    bindTex(p, 'uT', 0, trail.read.t);
+    gl.uniform1f(gl.getUniformLocation(p, 'uK'), 0.94);
+    quadDraw();
+    trail.swap();
+
+    p = P.dot;
+    gl.useProgram(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, trail.write.f);
+    gl.viewport(0, 0, TW, TH);
+    bindTex(p, 'uP', 0, parts.read.t);
+    gl.uniform2f(gl.getUniformLocation(p, 'uDim'), PW, PH);
+    gl.uniform1f(gl.getUniformLocation(p, 'uPx'), Math.max(1.6, TH / 360));
+    const PALS_ = PALS[pal];
+    gl.uniform3fv(gl.getUniformLocation(p, 'uPa'), PALS_.a);
+    gl.uniform3fv(gl.getUniformLocation(p, 'uPb'), PALS_.b);
+    gl.uniform3fv(gl.getUniformLocation(p, 'uPc'), PALS_.c);
+    gl.uniform3fv(gl.getUniformLocation(p, 'uPd'), PALS_.d);
+    gl.uniform2fv(gl.getUniformLocation(p, 'uHue'), PALS_.h);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ids);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.POINTS, 0, COUNT);
+    gl.disable(gl.BLEND);
+    trail.swap();
+
+    p = P.show;
+    useQuad(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    bindTex(p, 'uT', 0, trail.read.t);
+    quadDraw();
+  }
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 1.5);
+    canvas.width = Math.floor(innerWidth * dpr);
+    canvas.height = Math.floor(innerHeight * dpr);
+    sizeTrail();
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // Warm up so the first paint already flows.
+  for (let i = 0; i < 90; i++) { simT += 1 / 60; step(1 / 60); }
+
+  let lx = 0.5, ly = 0.5, lt = 0;
+  function pushVortex(x, y) {
+    const now = performance.now();
+    const dt = Math.max((now - lt) / 1000, 1e-3); lt = now;
+    const vx = (x - lx) / dt, vy = (y - ly) / dt;
+    lx = x; ly = y;
+    const sp = Math.min(Math.hypot(vx, vy), 6);
+    vort.x = x; vort.y = y;
+    vort.vx = (vx / Math.max(sp, 1e-3)) * sp;
+    vort.vy = (vy / Math.max(sp, 1e-3)) * sp;
+    vort.life = Math.min(1.2, 0.25 + sp * 0.35);
+  }
+  function evtPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width, 1 - (e.clientY - r.top) / r.height];
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    const [x, y] = evtPos(e); lx = x; ly = y; lt = performance.now();
+    vort.x = x; vort.y = y; vort.vx = 0.6; vort.vy = 0.4; vort.life = 1.2;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.buttons !== 1) return;
+    const [x, y] = evtPos(e);
+    pushVortex(x, y);
+  });
+  let lastIdle = performance.now();
+  setInterval(() => {
+    if (performance.now() - lastIdle < 100) return;
+    const a = Math.random() * Math.PI * 2;
+    vort.x = 0.2 + Math.random() * 0.6;
+    vort.y = 0.2 + Math.random() * 0.6;
+    vort.vx = Math.cos(a) * 1.6;
+    vort.vy = Math.sin(a) * 1.6;
+    vort.life = 1.2;
+  }, 2600);
+  ['pointerdown', 'pointermove'].forEach((ev) =>
+    canvas.addEventListener(ev, () => { lastIdle = performance.now(); }));
+
+  document.querySelectorAll('[data-pal]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-pal]').forEach((o) => o.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+    pal = +b.dataset.pal;
+  }));
+  const pauseBtn = document.getElementById('pause');
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused; pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    makeParts();
+    for (const s of [trail.read, trail.write]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, s.f);
+      gl.viewport(0, 0, TW, TH);
+      gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    for (let i = 0; i < 90; i++) { simT += 1 / 60; step(1 / 60); }
+  });
+
+  const fpsEl = document.getElementById('fps');
+  let last = performance.now(), fpsA = 60, lastFps = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = now - last; last = now;
+    if (dt <= 0) return;
+    fpsA += ((1000 / dt) - fpsA) * 0.05;
+    if (now - lastFps > 500) { fpsEl.textContent = Math.round(fpsA) + ' fps'; lastFps = now; }
+    if (paused) return;
+    simT += Math.min(dt, 100) / 1000;
+    vort.life = Math.max(0, vort.life - dt / 1000);
+    step(Math.min(dt / 1000, 1 / 20));
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
