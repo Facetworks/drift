@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Drift — go with the flow</title>
 <meta name="description" content="Tens of thousands of particles riding a curl-noise flow field on your GPU, in the browser. Drag to stir vortices. WebGL2, no server, no dependencies.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -14,7 +14,7 @@
     --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;font-family:var(--sans)}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;font-family:var(--sans);-webkit-tap-highlight-color:transparent}
   #c{position:fixed;inset:0;width:100vw;height:100vh;display:block;touch-action:none;cursor:move}
   .overlay{position:fixed;inset:0;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between;padding:clamp(16px,3.2vw,38px)}
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:9px}
@@ -22,7 +22,7 @@
   @keyframes p{0%,100%{opacity:.35}50%{opacity:1}}
   h1{font-size:clamp(38px,8.5vw,120px);font-weight:200;letter-spacing:.13em;margin:10px 0 0;line-height:.98;text-wrap:balance;text-shadow:0 0 40px rgba(34,211,238,.12)}
   .tag{margin:13px 0 0;color:var(--muted);font-size:clamp(13px,1.5vw,16px);max-width:38ch;line-height:1.5}
-  .bar{pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--stroke);border-radius:14px;padding:8px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);width:fit-content;max-width:100%}
+  .bar{pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--stroke);border-radius:14px;padding:8px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);width:fit-content;max-width:calc(100vw - 32px);overflow-x:auto}
   button{font:500 13px var(--sans);color:var(--text);background:rgba(255,255,255,.04);border:1px solid var(--stroke);border-radius:9px;padding:9px 13px;cursor:pointer;transition:background .18s,border-color .18s,transform .05s}
   button:hover{background:rgba(255,255,255,.09);border-color:rgba(150,160,220,.3)}
   button:active{transform:translateY(1px)}
@@ -44,7 +44,7 @@
 <div class="overlay">
   <a class="src" href="https://github.com/Facetworks/drift" target="_blank" rel="noopener">Source &#8599;</a>
   <div>
-    <div class="eyebrow"><span class="dot"></span>Live flow field &middot; 65,536 particles &middot; WebGL2</div>
+    <div class="eyebrow"><span class="dot"></span>Live flow field &middot; <span id="pcount">65,536</span> particles &middot; WebGL2</div>
     <h1>DRIFT</h1>
     <p class="tag">A curl-noise current carrying sixty-five thousand particles on your GPU. Drag to spin up vortices.</p>
   </div>
@@ -60,7 +60,7 @@
 <div class="fallback" id="fallback">
   <div class="card">
     <h2>No floating-point canvas</h2>
-    <p>This experiment needs WebGL2 with float render targets and float blending (<code>EXT_color_buffer_float</code>, <code>EXT_float_blend</code>). Open it in a recent Chrome, Edge, Safari, or Firefox and the current will appear.</p>
+    <p>This experiment needs WebGL2 with float render targets and float blending (<code>EXT_color_buffer_float</code>). Open it in a recent Chrome, Edge, Safari, or Firefox and the current will appear.</p>
   </div>
 </div>
 <script>
@@ -71,21 +71,57 @@
  * stamp them additively into a fading trail map, display the trails.
  * No CPU in the loop. */
 const canvas = document.getElementById('c');
+const MOBILE = matchMedia('(pointer:coarse)').matches || Math.min(innerWidth, innerHeight) < 500 || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
 const gl = canvas.getContext('webgl2', { antialias: false, depth: false, alpha: false });
-if (!gl || !gl.getExtension('EXT_color_buffer_float') || !gl.getExtension('EXT_float_blend')) {
+canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); document.getElementById('fallback').classList.add('on'); });
+// Phone GPUs often lack 32F render targets but do 16F (which is also
+// texture-filterable, unlike 32F). Probe a tiny FBO and use whichever
+// float format is actually renderable.
+let TEX_IFMT = 0;
+function floatOK() {
+  if (!gl) return false;
+  gl.getExtension('EXT_color_buffer_float');
+  gl.getExtension('EXT_color_buffer_half_float');
+  const probe = (ifmt) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, 4, 4, 0, gl.RGBA, gl.FLOAT, null);
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(f);
+    gl.deleteTexture(t);
+    return ok;
+  };
+  if (probe(gl.RGBA16F)) { TEX_IFMT = gl.RGBA16F; return true; }
+  if (probe(gl.RGBA32F)) { TEX_IFMT = gl.RGBA32F; return true; }
+  return false;
+}
+if (!floatOK()) {
   document.getElementById('fallback').classList.add('on');
 } else {
   main();
 }
 
 function main() {
-  const PW = 256, PH = 256, COUNT = PW * PH;
+  const PW = MOBILE ? 128 : 256, PH = MOBILE ? 128 : 256, COUNT = PW * PH;
   const PALS = [
     { a: [0.45, 0.55, 0.60], b: [0.40, 0.40, 0.35], c: [1.00, 1.00, 1.00], d: [0.55, 0.75, 0.90], h: [0.42, 0.50] },
     { a: [0.55, 0.30, 0.15], b: [0.45, 0.35, 0.30], c: [1.00, 1.00, 1.00], d: [0.00, 0.15, 0.25], h: [0.42, 0.02] },
     { a: [0.40, 0.25, 0.55], b: [0.45, 0.40, 0.45], c: [1.00, 1.00, 1.00], d: [0.75, 0.35, 0.10], h: [0.42, 0.72] },
   ];
   let pal = 0, paused = false, simT = 0, frameNo = 0;
+  // Keep the desktop look pixel-identical: HDR float trails when the GPU can
+  // blend into float, 8-bit trails (always blendable) + faster fade on phones.
+  const TRAIL_BYTE = new URLSearchParams(location.search).has('byte') || !gl.getExtension('EXT_float_blend');
+  const TRAIL_IFMT = TRAIL_BYTE ? gl.RGBA8 : TEX_IFMT, TRAIL_TYPE = TRAIL_BYTE ? gl.UNSIGNED_BYTE : gl.FLOAT;
+  const _pc = document.getElementById('pcount'); if (_pc) _pc.textContent = COUNT.toLocaleString('en-US');
   const vort = { x: 0.5, y: 0.5, vx: 0, vy: 0, life: 0 };
 
   const VS_QUAD = `#version 300 es
@@ -136,14 +172,16 @@ function main() {
     gl_PointSize = uPx;
     float h = fract(s.a*uHue.x + uHue.y);
     vec3 col = uPa + uPb*cos(6.2831853*(uPc*h + uPd));
-    vCol = col*0.7;
+    vCol = col*0.30;
   }`;
   const FS_DOT = `#version 300 es
   precision mediump float; in vec3 vCol; out vec4 o;
+  uniform float uGain;
   void main(){
     float d = length(gl_PointCoord - 0.5);
     float a = smoothstep(0.5, 0.08, d);
-    o = vec4(vCol*a, 1.0);
+    // 8-bit trails store 1/11th scale; the display shader expands it back.
+    o = vec4(vCol*a*uGain, 1.0);
   }`;
   const FS_FADE = `#version 300 es
   precision highp float; in vec2 vUv; out vec4 o;
@@ -151,10 +189,10 @@ function main() {
   void main(){ o = vec4(texture(uT, vUv).rgb*uK, 1.); }`;
   const FS_SHOW = `#version 300 es
   precision highp float; in vec2 vUv; out vec4 o;
-  uniform sampler2D uT;
+  uniform sampler2D uT; uniform float uTone;
   void main(){
     vec3 c = texture(uT, vUv).rgb;
-    c = vec3(1.0) - exp(-c*1.5);
+    c = vec3(1.0) - exp(-c*uTone);
     float vig = smoothstep(1.30, 0.30, length(vUv-0.5)*1.5);
     o = vec4(c*(0.45 + 0.55*vig), 1.0);
   }`;
@@ -183,14 +221,14 @@ function main() {
   for (let i = 0; i < COUNT; i++) idArr[i] = i;
   gl.bufferData(gl.ARRAY_BUFFER, idArr, gl.STATIC_DRAW);
 
-  function fboTex(w, h, data) {
+  function fboTex(w, h, data, ifmt, type) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, data || null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt || TEX_IFMT, w, h, 0, gl.RGBA, type || gl.FLOAT, data || null);
     const f = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, f);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
@@ -214,12 +252,12 @@ function main() {
   makeParts();
   let TW = 1024, TH = 640, trail = null;
   function makeTrail() {
-    const a = fboTex(TW, TH, null), b = fboTex(TW, TH, null);
+    const a = fboTex(TW, TH, null, TRAIL_IFMT, TRAIL_TYPE), b = fboTex(TW, TH, null, TRAIL_IFMT, TRAIL_TYPE);
     trail = { read: a, write: b, swap() { const t = this.read; this.read = this.write; this.write = t; } };
   }
   function sizeTrail() {
     const a = canvas.width / Math.max(canvas.height, 1);
-    TH = 640; TW = Math.max(320, Math.min(1280, Math.round(TH * a)));
+    TH = MOBILE ? 360 : 640; TW = Math.max(240, Math.min(MOBILE ? 640 : 1280, Math.round(TH * a)));
     makeTrail();
   }
 
@@ -239,6 +277,9 @@ function main() {
 
   function step(dt) {
     frameNo++;
+    // Time-based fade + deposit gain: a 120Hz phone must look like a 60Hz
+    // phone, not erase twice as fast with twice the inflow.
+    const dt60 = Math.min(dt, 1 / 20) * 60;
     const asp = TW / TH;
     let p = P.upd;
     gl.useProgram(p);
@@ -247,7 +288,7 @@ function main() {
     bindTex(p, 'uP', 0, parts.read.t);
     gl.uniform1f(gl.getUniformLocation(p, 'uDt'), dt);
     gl.uniform1f(gl.getUniformLocation(p, 'uT'), simT);
-    gl.uniform1f(gl.getUniformLocation(p, 'uFrame'), frameNo);
+    gl.uniform1f(gl.getUniformLocation(p, 'uFrame'), frameNo % 4096);
     gl.uniform1f(gl.getUniformLocation(p, 'uAsp'), asp);
     gl.uniform1f(gl.getUniformLocation(p, 'uLife'), vort.life);
     gl.uniform4f(gl.getUniformLocation(p, 'uVort'), vort.x, vort.y, vort.vx, vort.vy);
@@ -262,7 +303,7 @@ function main() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, trail.write.f);
     gl.viewport(0, 0, TW, TH);
     bindTex(p, 'uT', 0, trail.read.t);
-    gl.uniform1f(gl.getUniformLocation(p, 'uK'), 0.94);
+    gl.uniform1f(gl.getUniformLocation(p, 'uK'), Math.pow(0.94, dt60));
     quadDraw();
     trail.swap();
 
@@ -273,6 +314,7 @@ function main() {
     bindTex(p, 'uP', 0, parts.read.t);
     gl.uniform2f(gl.getUniformLocation(p, 'uDim'), PW, PH);
     gl.uniform1f(gl.getUniformLocation(p, 'uPx'), Math.max(1.6, TH / 360));
+    gl.uniform1f(gl.getUniformLocation(p, 'uGain'), (TRAIL_BYTE ? (1 / 11) : 1) * dt60);
     const PALS_ = PALS[pal];
     gl.uniform3fv(gl.getUniformLocation(p, 'uPa'), PALS_.a);
     gl.uniform3fv(gl.getUniformLocation(p, 'uPb'), PALS_.b);
@@ -293,11 +335,12 @@ function main() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
     bindTex(p, 'uT', 0, trail.read.t);
+    gl.uniform1f(gl.getUniformLocation(p, 'uTone'), TRAIL_BYTE ? 16.5 : 1.5);
     quadDraw();
   }
 
   function resize() {
-    const dpr = Math.min(devicePixelRatio || 1, 1.5);
+    const dpr = Math.min(devicePixelRatio || 1, MOBILE ? 1 : 1.5);
     canvas.width = Math.floor(innerWidth * dpr);
     canvas.height = Math.floor(innerHeight * dpr);
     sizeTrail();
@@ -306,7 +349,7 @@ function main() {
   resize();
 
   // Warm up so the first paint already flows.
-  for (let i = 0; i < 90; i++) { simT += 1 / 60; step(1 / 60); }
+  for (let i = 0; i < (MOBILE ? 25 : 90); i++) { simT += 1 / 60; step(1 / 60); }
 
   let lx = 0.5, ly = 0.5, lt = 0;
   function pushVortex(x, y) {
@@ -327,7 +370,7 @@ function main() {
   canvas.addEventListener('pointerdown', (e) => {
     const [x, y] = evtPos(e); lx = x; ly = y; lt = performance.now();
     vort.x = x; vort.y = y; vort.vx = 0.6; vort.vy = 0.4; vort.life = 1.2;
-    canvas.setPointerCapture(e.pointerId);
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   });
   canvas.addEventListener('pointermove', (e) => {
     if (e.buttons !== 1) return;
@@ -363,7 +406,7 @@ function main() {
       gl.viewport(0, 0, TW, TH);
       gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
     }
-    for (let i = 0; i < 90; i++) { simT += 1 / 60; step(1 / 60); }
+    for (let i = 0; i < (MOBILE ? 25 : 90); i++) { simT += 1 / 60; step(1 / 60); }
   });
 
   const fpsEl = document.getElementById('fps');
